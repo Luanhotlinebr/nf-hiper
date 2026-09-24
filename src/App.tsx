@@ -92,6 +92,7 @@ const brl = (v: string) =>
   });
 const MAX_PRODUCT_CODE = 2147483647;
 const PRODUCT_CODE_SEQUENCE_START = 1000000000;
+const PRODUCT_CODE_SEQUENCE_KEY = "hiper-next-product-code";
 const productBarcodes = (item: Product) =>
   [String(item.codigo_de_barras || ""), ...item.variants.map((v) => v.barcode)]
     .map((code) => code.trim())
@@ -126,14 +127,40 @@ const validStock = (value: unknown) => {
   const number = Number(text.replace(",", "."));
   return Number.isFinite(number) && number >= 0;
 };
-const nextProductCode = (items: Product[]) => {
-  const used = new Set(
-    items
-      .map((item) => String(item.codigo_produto || "").trim())
-      .filter((code) => /^\d+$/.test(code) && Number(code) <= MAX_PRODUCT_CODE),
+const syncProductCodeSequence = (items: Product[]) => {
+  const highestUsed = items.reduce((highest, item) => {
+    const code = Number(String(item.codigo_produto || "").trim());
+    return Number.isInteger(code) && code >= PRODUCT_CODE_SEQUENCE_START
+      ? Math.max(highest, code)
+      : highest;
+  }, PRODUCT_CODE_SEQUENCE_START - 1);
+  const stored = Number(localStorage.getItem(PRODUCT_CODE_SEQUENCE_KEY));
+  const next = Math.max(
+    PRODUCT_CODE_SEQUENCE_START,
+    Number.isInteger(stored) ? stored : PRODUCT_CODE_SEQUENCE_START,
+    highestUsed + 1,
   );
-  let next = PRODUCT_CODE_SEQUENCE_START;
+  localStorage.setItem(
+    PRODUCT_CODE_SEQUENCE_KEY,
+    String(Math.min(next, MAX_PRODUCT_CODE)),
+  );
+};
+const reserveNextProductCode = (items: Product[]) => {
+  const used = new Set(
+    items.map((item) => String(item.codigo_produto || "").trim()).filter(Boolean),
+  );
+  const stored = Number(localStorage.getItem(PRODUCT_CODE_SEQUENCE_KEY));
+  let next =
+    Number.isInteger(stored) && stored >= PRODUCT_CODE_SEQUENCE_START
+      ? stored
+      : PRODUCT_CODE_SEQUENCE_START;
   while (used.has(String(next)) && next < MAX_PRODUCT_CODE) next += 1;
+  if (used.has(String(next)) || next > MAX_PRODUCT_CODE)
+    throw new Error("Sequência de Código do Produto esgotada");
+  localStorage.setItem(
+    PRODUCT_CODE_SEQUENCE_KEY,
+    String(Math.min(next + 1, MAX_PRODUCT_CODE)),
+  );
   return String(next);
 };
 const normalizeOversizedProductCodes = (items: Product[]) => {
@@ -153,13 +180,29 @@ const normalizeOversizedProductCodes = (items: Product[]) => {
     return { ...item, codigo_produto: replacement };
   });
 };
-const productCodeFromBarcode = (barcode: string, items: Product[]) => {
+const productCodeFromBarcode = (
+  barcode: string,
+  items: Product[],
+  currentCode = "",
+  currentId = "",
+) => {
   const prefix = barcode.slice(0, 10);
-  return !prefix
-    ? ""
-    : Number(prefix) <= MAX_PRODUCT_CODE
-      ? prefix
-      : nextProductCode(items);
+  if (!prefix) return "";
+  if (Number(prefix) <= MAX_PRODUCT_CODE) return prefix;
+  const normalizedCurrent = currentCode.trim();
+  const usedByAnotherProduct = items.some(
+    (item) =>
+      item._id !== currentId &&
+      String(item.codigo_produto || "").trim() === normalizedCurrent,
+  );
+  if (
+    /^\d+$/.test(normalizedCurrent) &&
+    Number(normalizedCurrent) >= PRODUCT_CODE_SEQUENCE_START &&
+    Number(normalizedCurrent) <= MAX_PRODUCT_CODE &&
+    !usedByAnotherProduct
+  )
+    return normalizedCurrent;
+  return reserveNextProductCode(items);
 };
 const generateUniqueEan13 = (used: Set<string>) => {
   let code = "";
@@ -297,7 +340,9 @@ const loadProducts = (): Product[] => {
               : [],
           })) as Product[])
       : [];
-    return normalizeOversizedProductCodes(products);
+    const normalized = normalizeOversizedProductCodes(products);
+    syncProductCodeSequence(normalized);
+    return normalized;
   } catch {
     return [];
   }
@@ -392,6 +437,7 @@ export default function App() {
     setTimeout(() => setMsg(""), 2500);
   };
   const saveList = (x: Product[]) => {
+    syncProductCodeSequence(x);
     setProducts(x);
     localStorage.setItem("hiper-products-final", JSON.stringify(x));
   };
@@ -437,7 +483,12 @@ export default function App() {
       ].filter(Boolean),
     );
     const code = generateUniqueEan13(used);
-    const productCode = productCodeFromBarcode(code, products);
+    const productCode = productCodeFromBarcode(
+      code,
+      products,
+      String(p.codigo_produto || ""),
+      p._id,
+    );
     setP((x) => ({
       ...x,
       codigo_de_barras: code,
@@ -448,6 +499,15 @@ export default function App() {
         ? "Código de barras gerado com Código do Produto sequencial"
         : "Código interno gerado e replicado",
     );
+  }
+  function generateSequentialProductCode() {
+    try {
+      const code = reserveNextProductCode(products);
+      set("codigo_produto", code);
+      flash(`Código do Produto ${code} gerado`);
+    } catch {
+      flash("Não há mais códigos disponíveis na sequência");
+    }
   }
   function generateVariantBarcode(index: number) {
     const used = new Set(
@@ -914,12 +974,33 @@ export default function App() {
                 <div className="grid">
                   {tab === "produto" && (
                     <>
-                      <Input
-                        label="Código do produto"
-                        name="codigo_produto"
-                        p={p}
-                        set={set}
-                      />
+                      <div className="field product-code-field">
+                        <span>Código do produto</span>
+                        <div className="input-action">
+                          <input
+                            inputMode="numeric"
+                            value={String(p.codigo_produto || "")}
+                            onChange={(e) =>
+                              set(
+                                "codigo_produto",
+                                e.target.value.replace(/\D/g, "").slice(0, 10),
+                              )
+                            }
+                          />
+                          <button
+                            type="button"
+                            className="generate sequence-generate"
+                            onClick={generateSequentialProductCode}
+                          >
+                            <Plus />
+                            Próximo código
+                          </button>
+                        </div>
+                        <small>
+                          A sequência fica salva neste navegador e continua na
+                          próxima utilização.
+                        </small>
+                      </div>
                       <div className="field barcode-field">
                         <span>Código de barras</span>
                         <div className="input-action">
@@ -937,6 +1018,8 @@ export default function App() {
                                 codigo_produto: productCodeFromBarcode(
                                   barcode,
                                   products,
+                                  String(current.codigo_produto || ""),
+                                  current._id,
                                 ),
                               }));
                             }}
