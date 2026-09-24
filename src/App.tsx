@@ -85,8 +85,70 @@ const csv = (v: unknown) => {
   const s = String(v ?? "");
   return /[;"\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 };
+const PRICE_FIELDS = [
+  "preco_venda",
+  "preco_minimo_de_venda",
+  "preco_custo",
+  "preco_fornecedor",
+] as const;
+const isPriceField = (name: string) =>
+  PRICE_FIELDS.includes(name as (typeof PRICE_FIELDS)[number]);
+const parsePrice = (value: unknown) => {
+  let text = String(value ?? "")
+    .trim()
+    .replace(/\s/g, "")
+    .replace(/^R\$/i, "");
+  if (!text || !/^-?[\d.,]+$/.test(text)) return undefined;
+  const negative = text.startsWith("-");
+  if (negative) text = text.slice(1);
+  const comma = text.lastIndexOf(",");
+  const dot = text.lastIndexOf(".");
+  const separator = Math.max(comma, dot);
+  const integer = (separator >= 0 ? text.slice(0, separator) : text).replace(
+    /\D/g,
+    "",
+  );
+  const fraction =
+    separator >= 0 ? text.slice(separator + 1).replace(/\D/g, "") : "";
+  if (!integer && !fraction) return undefined;
+  const number = Number(
+    `${negative ? "-" : ""}${integer || "0"}${fraction ? `.${fraction}` : ""}`,
+  );
+  return Number.isFinite(number) ? number : undefined;
+};
+const priceInput = (value: string) => {
+  const text = value.replace(/[^\d.,]/g, "");
+  if (!text) return "";
+  const separator = Math.max(text.lastIndexOf(","), text.lastIndexOf("."));
+  if (separator < 0) return text.replace(/\D/g, "");
+  const integer = text.slice(0, separator).replace(/\D/g, "") || "0";
+  const fraction = text
+    .slice(separator + 1)
+    .replace(/\D/g, "")
+    .slice(0, 2);
+  return `${integer},${fraction}`;
+};
+const priceForInput = (value: unknown) => {
+  if (String(value ?? "").trim() === "") return "";
+  const number = parsePrice(value);
+  return number === undefined
+    ? String(value)
+    : number.toFixed(2).replace(".", ",");
+};
+const priceForHiper = (value: unknown) => {
+  if (String(value ?? "").trim() === "") return "";
+  const number = parsePrice(value);
+  return number === undefined ? "" : number.toFixed(2);
+};
+const normalizeProductPrices = (product: Product) => {
+  const normalized = { ...product };
+  PRICE_FIELDS.forEach((field) => {
+    normalized[field] = priceForInput(product[field]);
+  });
+  return normalized;
+};
 const brl = (v: string) =>
-  (Number(v.replace(",", ".")) || 0).toLocaleString("pt-BR", {
+  (parsePrice(v) || 0).toLocaleString("pt-BR", {
     style: "currency",
     currency: "BRL",
   });
@@ -233,6 +295,17 @@ const productIssue = (x: Product): ValidationIssue | undefined => {
     };
   if (!x.preco_venda.trim())
     return { tab: "precos", message: "Informe o preço de venda" };
+  const invalidPrice = PRICE_FIELDS.find((field) => {
+    const value = String(x[field] ?? "").trim();
+    if (!value) return false;
+    const number = parsePrice(value);
+    return number === undefined || number < 0;
+  });
+  if (invalidPrice)
+    return {
+      tab: "precos",
+      message: "Informe preços válidos, maiores ou iguais a zero",
+    };
   if (productCode && !/^\d+$/.test(productCode))
     return {
       tab: "produto",
@@ -319,26 +392,28 @@ const loadProducts = (): Product[] => {
     const products = Array.isArray(parsed)
       ? (parsed
           .filter((item) => item && typeof item === "object")
-          .map((item) => ({
-            ...blank(),
-            ...item,
-            nome: String(item.nome ?? ""),
-            preco_venda: String(item.preco_venda ?? ""),
-            enviar_dados_balanca: item.enviar_dados_balanca === true,
-            variants: Array.isArray(item.variants)
-              ? item.variants
-                  .filter(
-                    (variant: unknown) =>
-                      variant && typeof variant === "object",
-                  )
-                  .map((variant: Record<string, unknown>) => ({
-                    a: String(variant.a ?? ""),
-                    b: String(variant.b ?? ""),
-                    barcode: String(variant.barcode ?? ""),
-                    stock: String(variant.stock ?? ""),
-                  }))
-              : [],
-          })) as Product[])
+          .map((item) =>
+            normalizeProductPrices({
+              ...blank(),
+              ...item,
+              nome: String(item.nome ?? ""),
+              preco_venda: String(item.preco_venda ?? ""),
+              enviar_dados_balanca: item.enviar_dados_balanca === true,
+              variants: Array.isArray(item.variants)
+                ? item.variants
+                    .filter(
+                      (variant: unknown) =>
+                        variant && typeof variant === "object",
+                    )
+                    .map((variant: Record<string, unknown>) => ({
+                      a: String(variant.a ?? ""),
+                      b: String(variant.b ?? ""),
+                      barcode: String(variant.barcode ?? ""),
+                      stock: String(variant.stock ?? ""),
+                    }))
+                : [],
+            } as Product),
+          ) as Product[])
       : [];
     const normalized = normalizeOversizedProductCodes(products);
     syncProductCodeSequence(normalized);
@@ -360,6 +435,7 @@ function Input({
   set: (k: string, v: string) => void;
   required?: boolean;
 }) {
+  const price = isPriceField(name);
   const maxLength =
     name === "nome"
       ? 60
@@ -374,9 +450,18 @@ function Input({
       </span>
       <input
         maxLength={maxLength}
+        inputMode={price ? "decimal" : undefined}
+        placeholder={price ? "0,00" : undefined}
         value={String(p[name] ?? "")}
-        onChange={(e) => set(name, e.target.value)}
+        onChange={(e) =>
+          set(name, price ? priceInput(e.target.value) : e.target.value)
+        }
+        onBlur={() => {
+          if (price && String(p[name] ?? "").trim())
+            set(name, priceForInput(p[name]));
+        }}
       />
+      {price && <small>Use até 2 casas decimais.</small>}
     </label>
   );
 }
@@ -537,12 +622,12 @@ export default function App() {
       setTab(issue.tab);
       return flash(issue.message);
     }
-    const item = {
+    const item = normalizeProductPrices({
       ...p,
       nome: p.nome.trim(),
       ncm: String(p.ncm || "00000000"),
       origem_produto: String(p.origem_produto || "0"),
-    };
+    });
     const next = normalizeOversizedProductCodes(
       editing
         ? products.map((x) => (x._id === p._id ? item : x))
@@ -603,6 +688,9 @@ export default function App() {
       base.ncm = base.ncm || "00000000";
       base.origem_produto = base.origem_produto || "0";
       base.enviar_dados_balanca = x.enviar_dados_balanca ? "true" : "false";
+      PRICE_FIELDS.forEach((field) => {
+        base[field] = priceForHiper(x[field]);
+      });
       if (x.variants.length) {
         x.variants.forEach((v, index) =>
           rows.push({
@@ -684,7 +772,9 @@ export default function App() {
           cur = blank();
           headers.forEach((k) => (cur![k] = at(r, k)));
           cur.nome = nome;
-          cur.preco_venda = at(r, "preco_venda");
+          PRICE_FIELDS.forEach((field) => {
+            cur![field] = priceForInput(at(r, field));
+          });
           cur.ncm = at(r, "ncm") || "00000000";
           cur.origem_produto = at(r, "origem_produto") || "0";
           cur.enviar_dados_balanca = parseBoolean(
