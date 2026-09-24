@@ -135,6 +135,12 @@ const priceForInput = (value: unknown) => {
     ? String(value)
     : number.toFixed(2).replace(".", ",");
 };
+const halfPriceForInput = (value: unknown) => {
+  const number = parsePrice(value);
+  if (number === undefined) return "";
+  const halfInCents = Math.round(Math.round(number * 100) / 2);
+  return (halfInCents / 100).toFixed(2).replace(".", ",");
+};
 const priceForHiper = (value: unknown) => {
   if (String(value ?? "").trim() === "") return "";
   const number = parsePrice(value);
@@ -453,9 +459,15 @@ function Input({
         inputMode={price ? "decimal" : undefined}
         placeholder={price ? "0,00" : undefined}
         value={String(p[name] ?? "")}
-        onChange={(e) =>
-          set(name, price ? priceInput(e.target.value) : e.target.value)
-        }
+        onChange={(e) => {
+          const value = price ? priceInput(e.target.value) : e.target.value;
+          set(name, value);
+          if (name === "preco_venda") {
+            const half = value ? halfPriceForInput(value) : "";
+            set("preco_custo", half);
+            set("preco_fornecedor", half);
+          }
+        }}
         onBlur={() => {
           if (price && String(p[name] ?? "").trim())
             set(name, priceForInput(p[name]));
