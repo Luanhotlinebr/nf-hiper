@@ -161,6 +161,22 @@ const productCodeFromBarcode = (barcode: string, items: Product[]) => {
       ? prefix
       : nextProductCode(items);
 };
+const generateUniqueEan13 = (used: Set<string>) => {
+  let code = "";
+  do {
+    const random = crypto.getRandomValues(new Uint32Array(12));
+    const body = Array.from(random, (number, index) =>
+      String(index === 0 ? 1 + (number % 9) : number % 10),
+    ).join("");
+    const sum = [...body].reduce(
+      (total, digit, index) =>
+        total + Number(digit) * (index % 2 === 0 ? 1 : 3),
+      0,
+    );
+    code = body + String((10 - (sum % 10)) % 10);
+  } while (used.has(code));
+  return code;
+};
 const productIssue = (x: Product): ValidationIssue | undefined => {
   const nome = x.nome.trim();
   const productCode = String(x.codigo_produto || "").trim();
@@ -366,6 +382,7 @@ export default function App() {
   const [p, setP] = useState(blank);
   const [tab, setTab] = useState<Tab>("produto");
   const [editing, setEditing] = useState(false);
+  const [useSecondGrade, setUseSecondGrade] = useState(false);
   const [q, setQ] = useState("");
   const [msg, setMsg] = useState("");
   const set = (k: string, v: string | boolean | Variant[]) =>
@@ -381,6 +398,7 @@ export default function App() {
   const reset = () => {
     setP(blank());
     setEditing(false);
+    setUseSecondGrade(false);
     setTab("produto");
   };
   const list = useMemo(
@@ -412,23 +430,13 @@ export default function App() {
   );
   function generateInternalCode() {
     const used = new Set(
-      products.flatMap((x) => [
-        String(x.codigo_de_barras || ""),
-        ...x.variants.map((v) => v.barcode),
-      ]),
+      [
+        ...products.flatMap(productBarcodes),
+        String(p.codigo_de_barras || ""),
+        ...p.variants.map((variant) => variant.barcode),
+      ].filter(Boolean),
     );
-    let code = "";
-    do {
-      const random = crypto.getRandomValues(new Uint32Array(12));
-      const body = Array.from(random, (n, i) =>
-        String(i === 0 ? 1 + (n % 9) : n % 10),
-      ).join("");
-      const sum = [...body].reduce(
-        (total, digit, i) => total + Number(digit) * (i % 2 === 0 ? 1 : 3),
-        0,
-      );
-      code = body + String((10 - (sum % 10)) % 10);
-    } while (used.has(code));
+    const code = generateUniqueEan13(used);
     const productCode = productCodeFromBarcode(code, products);
     setP((x) => ({
       ...x,
@@ -441,8 +449,29 @@ export default function App() {
         : "Código interno gerado e replicado",
     );
   }
+  function generateVariantBarcode(index: number) {
+    const used = new Set(
+      [
+        ...products.flatMap(productBarcodes),
+        String(p.codigo_de_barras || ""),
+        ...p.variants.map((variant) => variant.barcode),
+      ].filter(Boolean),
+    );
+    const code = generateUniqueEan13(used);
+    set(
+      "variants",
+      p.variants.map((variant, variantIndex) =>
+        variantIndex === index ? { ...variant, barcode: code } : variant,
+      ),
+    );
+    flash("Código interno gerado para a variação");
+  }
   function submit(e: FormEvent) {
     e.preventDefault();
+    if (useSecondGrade && !String(p.grade_2 || "").trim()) {
+      setTab("grades");
+      return flash("Informe o nome da Grade 2");
+    }
     const issue = productIssue(p);
     if (issue) {
       setTab(issue.tab);
@@ -490,6 +519,12 @@ export default function App() {
     if (invalid?.issue) {
       setP(invalid.product);
       setEditing(true);
+      setUseSecondGrade(
+        Boolean(
+          String(invalid.product.grade_2 || "").trim() ||
+            invalid.product.variants.some((variant) => variant.b.trim()),
+        ),
+      );
       setTab(invalid.issue.tab);
       return flash(invalid.issue.message);
     }
@@ -727,24 +762,56 @@ export default function App() {
               </p>
               {tab === "grades" ? (
                 <>
-                  <div className="grid">
+                  <div className="grade-mode" aria-label="Quantidade de grades">
+                    <button
+                      type="button"
+                      className={!useSecondGrade ? "active" : ""}
+                      onClick={() => {
+                        setUseSecondGrade(false);
+                        setP((current) => ({
+                          ...current,
+                          grade_2: "",
+                          variants: current.variants.map((variant) => ({
+                            ...variant,
+                            b: "",
+                          })),
+                        }));
+                      }}
+                    >
+                      1 grade
+                    </button>
+                    <button
+                      type="button"
+                      className={useSecondGrade ? "active" : ""}
+                      onClick={() => setUseSecondGrade(true)}
+                    >
+                      2 grades
+                    </button>
+                  </div>
+                  <div className={`grid grade-names ${useSecondGrade ? "" : "single"}`}>
                     <Input
                       label="Nome da grade 1"
                       name="grade_1"
                       p={p}
                       set={set}
                     />
-                    <Input
-                      label="Nome da grade 2"
-                      name="grade_2"
-                      p={p}
-                      set={set}
-                    />
+                    {useSecondGrade && (
+                      <Input
+                        label="Nome da grade 2"
+                        name="grade_2"
+                        p={p}
+                        set={set}
+                      />
+                    )}
                   </div>
                   <div className="variants">
                     {p.variants.map((v, i) => (
-                      <div className="variant" key={i}>
+                      <div
+                        className={`variant ${useSecondGrade ? "" : "single"}`}
+                        key={i}
+                      >
                         <input
+                          className="variant-option"
                           maxLength={40}
                           placeholder="Opção 1"
                           value={v.a}
@@ -757,33 +824,50 @@ export default function App() {
                             )
                           }
                         />
+                        {useSecondGrade && (
+                          <input
+                            className="variant-option"
+                            maxLength={40}
+                            placeholder="Opção 2"
+                            value={v.b}
+                            onChange={(e) =>
+                              set(
+                                "variants",
+                                p.variants.map((x, j) =>
+                                  j === i ? { ...x, b: e.target.value } : x,
+                                ),
+                              )
+                            }
+                          />
+                        )}
+                        <div className="variant-barcode">
+                          <input
+                            maxLength={18}
+                            placeholder="Código de barras"
+                            value={v.barcode}
+                            onChange={(e) =>
+                              set(
+                                "variants",
+                                p.variants.map((x, j) =>
+                                  j === i
+                                    ? { ...x, barcode: e.target.value }
+                                    : x,
+                                ),
+                              )
+                            }
+                          />
+                          <button
+                            type="button"
+                            className="variant-generate"
+                            title="Gerar código interno de 13 dígitos"
+                            aria-label={`Gerar código de barras da variação ${i + 1}`}
+                            onClick={() => generateVariantBarcode(i)}
+                          >
+                            <Barcode />
+                          </button>
+                        </div>
                         <input
-                          maxLength={40}
-                          placeholder="Opção 2"
-                          value={v.b}
-                          onChange={(e) =>
-                            set(
-                              "variants",
-                              p.variants.map((x, j) =>
-                                j === i ? { ...x, b: e.target.value } : x,
-                              ),
-                            )
-                          }
-                        />
-                        <input
-                          maxLength={18}
-                          placeholder="Código de barras"
-                          value={v.barcode}
-                          onChange={(e) =>
-                            set(
-                              "variants",
-                              p.variants.map((x, j) =>
-                                j === i ? { ...x, barcode: e.target.value } : x,
-                              ),
-                            )
-                          }
-                        />
-                        <input
+                          className="variant-stock"
                           inputMode="decimal"
                           placeholder="Estoque da variação"
                           value={v.stock}
@@ -798,6 +882,8 @@ export default function App() {
                         />
                         <button
                           type="button"
+                          className="variant-remove"
+                          aria-label={`Remover variação ${i + 1}`}
                           onClick={() =>
                             set(
                               "variants",
@@ -981,6 +1067,12 @@ export default function App() {
                         ncm: String(x.ncm || "00000000"),
                         origem_produto: String(x.origem_produto || "0"),
                       });
+                      setUseSecondGrade(
+                        Boolean(
+                          String(x.grade_2 || "").trim() ||
+                            x.variants.some((variant) => variant.b.trim()),
+                        ),
+                      );
                       setEditing(true);
                       setTab("produto");
                       scrollTo({ top: 0, behavior: "smooth" });
